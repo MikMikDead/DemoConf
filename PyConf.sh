@@ -1,46 +1,48 @@
 #!/bin/bash
 
-# User inputs
-read -p "Enter the interface name: " interface_name
-read -p "Enter the desired IP address (or type 'dhcp' for DHCP): " ip_address
-read -p "Enter the gateway IP address: " gateway_ip
+# Configuration parameters
+INTERFACE=""
+IP=""
+NETMASK=""
+GATEWAY=""
+PORTS="22,80,443"
 
-# Automatic netmask selection based on entered IP address
-IFS=. read -r i1 i2 i3 i4 <<< "$ip_address"
-if [ "$i1" -eq 10 ]; then
-  netmask="255.0.0.0"
-elif [ "$i1" -eq 172 -a "$i2" -ge 16 -a "$i2" -le 31 ]; then
-  netmask="255.255.0.0"
-elif [ "$i1" -eq 192 -a "$i2" -eq 168 ]; then
-  netmask="255.255.255.0"
+# Prompt the user for input
+read -p "Enter interface name (e.g. eth0): " INTERFACE
+read -p "Enter IP address (or 'dhcp' for DHCP): " IP
+read -p "Enter netmask (e.g. 255.255.255.0): " NETMASK
+read -p "Enter gateway (e.g. 192.168.1.1): " GATEWAY
+read -p "Enter ports to leave open (default is 22,80,443): " PORTS
+
+# Configure network interface
+if [ "$IP" = "dhcp" ]; then
+  echo "Configuring $INTERFACE for DHCP..."
+  echo "auto $INTERFACE" >> /etc/network/interfaces
+  echo "iface $INTERFACE inet dhcp" >> /etc/network/interfaces
 else
-  echo "Invalid IP address entered"
-  exit 1
+  echo "Configuring $INTERFACE with static IP address $IP..."
+  echo "auto $INTERFACE" >> /etc/network/interfaces
+  echo "iface $INTERFACE inet static" >> /etc/network/interfaces
+  echo "  address $IP" >> /etc/network/interfaces
+  echo "  netmask $NETMASK" >> /etc/network/interfaces
+  echo "  gateway $GATEWAY" >> /etc/network/interfaces
 fi
 
-# Set up the networking using systemd-resolved
-cat <<EOF > /etc/systemd/network/${interface_name}.network
-[Match]
-Name=${interface_name}
-
-[Network]
-Address=${ip_address}/${netmask}
-Gateway=${gateway_ip}
-EOF
-
-systemctl restart systemd-networkd
+# Restart networking
+systemctl restart networking
 
 # Configure nftables
-read -p "Enter the ports to leave open (comma-separated): " open_ports
+echo "Configuring nftables..."
+echo "flush ruleset" > /etc/nftables.conf
+echo "table ip filter {" >> /etc/nftables.conf
+echo "  chain input {" >> /etc/nftables.conf
+echo "    type filter hook input priority 0;" >> /etc/nftables.conf
+echo "    policy drop;" >> /etc/nftables.conf
+echo "    ct state established,related accept" >> /etc/nftables.conf
+echo "    tcp dport { $PORTS } accept" >> /etc/nftables.conf
+echo "    icmp type echo-request accept" >> /etc/nftables.conf
+echo "  }" >> /etc/nftables.conf
+echo "}" >> /etc/nftables.conf
 
-if [ -n "$open_ports" ]; then
-  IFS=',' read -ra ports <<< "$open_ports"
-
-  # Set up nftables to allow incoming traffic on the specified ports
-  for port in "${ports[@]}"; do
-    nft add rule inet filter input tcp dport "$port" accept
-  done
-fi
-
-# Set the default nftables policy to drop incoming traffic
-nft add chain inet filter input { type filter hook input priority 0 \; policy drop \; }
+# Restart nftables
+systemctl restart nftables
