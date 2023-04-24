@@ -1,62 +1,55 @@
 #!/bin/bash
 
-# get available network interfaces
-interfaces=( $(ls -1 /sys/class/net/) )
-echo "Available network interfaces: ${interfaces[*]}"
+# Get interface information
+interfaces=$(ip addr show | awk '/inet / {print $2}')
+echo "Available interfaces: "
+echo "$interfaces"
+read -p "Enter the interface name to configure: " interface
 
-# get user input
-read -p "Enter the network interface to configure: " interface
-
-# check if interface is valid
-if ! echo "${interfaces[*]}" | grep -qw "${interface}"; then
-    echo "Invalid interface selected."
+# Get IP address information
+read -p "Enter the IP address to configure (or 'dhcp' to use DHCP): " ip_address
+if [[ "$ip_address" == "dhcp" ]]; then
+    dhcp="true"
 else
-    # get user input for IP address
-    read -p "Enter IP address or 'dhcp' to use DHCP: " ip
-
-    if [[ "${ip}" == "dhcp" ]]; then
-        dhcp="dhcp"
-    else
-        dhcp=""
-
-        # get netmask based on IP address
-        IFS=. read -r -a octets <<< "$ip"
-        if [[ "${octets[0]}" -lt 128 ]]; then
-            netmask="255.0.0.0"
-        elif [[ "${octets[0]}" -lt 192 ]]; then
-            netmask="255.255.0.0"
-        else
-            netmask="255.255.255.0"
-        fi
-
-        # get user inputs for gateway and ports to open
-        read -p "Enter gateway IP address: " gateway
-        read -p "Enter ports to open (comma-separated): " ports
-
-        # configure /etc/network/interfaces file
-        cat <<EOF >> /etc/network/interfaces
-
-auto ${interface}
-iface ${interface} inet ${dhcp}
-EOF
-        if [[ "${dhcp}" == "" ]]; then
-            cat <<EOF >> /etc/network/interfaces
-    address ${ip}
-    netmask ${netmask}
-    gateway ${gateway}
-EOF
-        fi
-
-        # configure nftables
-        nft flush ruleset
-        nft add table inet filter
-        nft add chain inet filter input { type filter hook input priority 0 \; }
-        nft add rule inet filter input tcp dport {${ports}} accept
-        nft add rule inet filter input udp dport {${ports}} accept
-        nft add rule inet filter input ct state established,related accept
-        nft add rule inet filter input ct state invalid drop
-        nft add rule inet filter input ip protocol icmp accept
-        nft add rule inet filter input drop
-        nft list ruleset
-    fi
+    dhcp="false"
+    read -p "Enter the netmask to configure (e.g. 255.255.255.0): " netmask
+    read -p "Enter the default gateway to configure: " gateway
 fi
+
+# Configure interface
+if [[ "$dhcp" == "true" ]]; then
+    echo "Configuring $interface with DHCP..."
+    dhclient $interface
+else
+    echo "Configuring $interface with static IP address..."
+    echo "auto $interface" >> /etc/network/interfaces
+    echo "iface $interface inet static" >> /etc/network/interfaces
+    echo "  address $ip_address" >> /etc/network/interfaces
+    echo "  netmask $netmask" >> /etc/network/interfaces
+    echo "  gateway $gateway" >> /etc/network/interfaces
+    ifup $interface
+fi
+
+# Get port information
+read -p "Enter the ports to open (e.g. 22,80,443): " open_ports
+echo "Configuring firewall..."
+# Flush existing rules
+nft flush ruleset
+# Configure default policies
+nft add table inet filter
+nft add chain inet filter input { type filter hook input priority 0\; }
+nft add chain inet filter forward { type filter hook forward priority 0\; }
+nft add chain inet filter output { type filter hook output priority 0\; }
+nft add rule inet filter input ct state invalid drop
+nft add rule inet filter input ct state established,related accept
+nft add rule inet filter output ct state established,related accept
+nft add rule inet filter forward ct state established,related accept
+nft add rule inet filter forward ct state invalid drop
+nft add rule inet filter forward iifname lo accept
+# Open specified ports
+for port in $(echo $open_ports | sed "s/,/ /g")
+do
+    nft add rule inet filter input tcp dport $port accept
+done
+# Close all other ports
+nft add rule inet filter input tcp dport 0-65535 drop
