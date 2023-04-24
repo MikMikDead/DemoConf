@@ -28,6 +28,17 @@ else
   echo "  gateway $GATEWAY" >> /etc/network/interfaces
 fi
 
+# Check if gateway and netmask are present in /etc/network/interfaces
+if ! grep -q "gateway" /etc/network/interfaces; then
+  echo "  gateway $GATEWAY" >> /etc/network/interfaces
+fi
+
+if ! grep -q "netmask" /etc/network/interfaces; then
+  # Determine netmask based on IP address
+  NETMASK=$(ifconfig $INTERFACE | grep "netmask" | cut -d " " -f 4)
+  echo "  netmask $NETMASK" >> /etc/network/interfaces
+fi
+
 # Restart networking
 systemctl restart networking
 
